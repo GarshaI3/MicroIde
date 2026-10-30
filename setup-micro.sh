@@ -1,13 +1,100 @@
 #!/usr/bin/env bash
-# micro IDE setup: emacs keys, 2-space indent, dashboard, file/symbol search,
-# project find/replace, formatters, LSP completion.
+# micro IDE setup: emacs keys, 2-space indent, neovim-style dashboard,
+# line selection, file/symbol search, project find/replace, formatters,
+# LSP completion, and automatic installation of the required tools.
+#
+# Usage:
+#   bash setup-micro.sh              # install everything
+#   bash setup-micro.sh --no-install # write config only
+#   bash setup-micro.sh --no-manager # skip the optional manager plugin
 set -e
+
+DO_INSTALL=1
+DO_MANAGER=1
+for arg in "$@"; do
+  case "$arg" in
+    --no-install) DO_INSTALL=0 ;;
+    --no-manager) DO_MANAGER=0 ;;
+    -h|--help)
+      sed -n '2,12p' "$0"; exit 0 ;;
+    *) echo "unknown arg: $arg"; exit 2 ;;
+  esac
+done
 
 CFG="$HOME/.config/micro"
 mkdir -p "$CFG"
 [ -d "$CFG/plug" ] && cp -r "$CFG" "$CFG.bak.$(date +%s)"
 rm -rf "$CFG/plug/projsearch"
 mkdir -p "$CFG/plug/ide"
+
+############################ package installation ############################
+install_tools() {
+  local os=""
+  if   command -v apt-get >/dev/null 2>&1; then os="debian"
+  elif command -v dnf     >/dev/null 2>&1; then os="fedora"
+  elif command -v pacman  >/dev/null 2>&1; then os="arch"
+  elif command -v brew    >/dev/null 2>&1; then os="macos"
+  else os="unknown"
+  fi
+
+  echo "==> Detected package manager: $os"
+
+  case "$os" in
+    debian)
+      sudo apt-get update
+      sudo apt-get install -y \
+        micro ripgrep fzf universal-ctags git clang-format shfmt yapf3 \
+        bat perl python3-pip npm curl
+      command -v yapf >/dev/null 2>&1 || sudo ln -sf "$(command -v yapf3)" /usr/local/bin/yapf
+      ;;
+    fedora)
+      sudo dnf install -y \
+        micro ripgrep fzf ctags git clang shfmt yapf bat perl nodejs npm
+      ;;
+    arch)
+      sudo pacman -S --needed --noconfirm \
+        micro ripgrep fzf ctags git clang shfmt yapf bat perl nodejs npm
+      ;;
+    macos)
+      brew install micro ripgrep fzf universal-ctags git clang-format shfmt yapf bat perl node
+      ;;
+    *)
+      echo "!! Unknown OS. Install manually: micro ripgrep fzf universal-ctags git"
+      echo "   clang-format shfmt yapf bat perl nodejs npm"
+      ;;
+  esac
+
+  if command -v npm >/dev/null 2>&1; then
+    echo "==> npm: prettier + LSP servers"
+    npm i -g prettier \
+      vscode-langservers-extracted \
+      bash-language-server \
+      python-lsp-server 2>/dev/null \
+      || echo "!! npm global install failed; install prettier / LSP servers manually"
+  fi
+
+  if command -v cargo >/dev/null 2>&1; then
+    echo "==> cargo: stylua"
+    cargo install stylua --locked 2>/dev/null || echo "!! stylua install failed"
+  else
+    echo "!! cargo not found; install Rust (https://rustup.rs) for stylua, or skip"
+  fi
+
+  if command -v pip3 >/dev/null 2>&1; then
+    echo "==> pip: python-lsp-server"
+    pip3 install --user python-lsp-server 2>/dev/null || true
+  fi
+  echo "==> Note: clangd, lua-language-server, marksman are not installed automatically."
+  echo "    clangd:        sudo apt install clangd    (or: brew install llvm)"
+  echo "    lua-ls:        https://github.com/LuaLS/lua-language-server/releases"
+  echo "    marksman:      https://github.com/artempyanykh/marksman/releases"
+}
+
+if [ "$DO_INSTALL" -eq 1 ]; then
+  install_tools
+else
+  echo "==> Skipping tool installation (--no-install)"
+fi
 
 ############################ settings.json ############################
 cat > "$CFG/settings.json" <<'EOF_SETTINGS'
@@ -46,7 +133,7 @@ cat > "$CFG/settings.json" <<'EOF_SETTINGS'
 }
 EOF_SETTINGS
 
-############################ bindings.json ############################
+############################ bindings.json (Emacs core + selection) ############################
 cat > "$CFG/bindings.json" <<'EOF_BIND'
 {
   "CtrlF": "CursorRight",
@@ -82,17 +169,31 @@ cat > "$CFG/bindings.json" <<'EOF_BIND'
   "Alt-s": "SkipMultiCursor",
   "Alt-m": "SpawnMultiCursorSelect",
   "Alt-q": "RemoveAllMultiCursors",
-  "CtrlX": "lua:ide.cx"
+  "CtrlX": "lua:ide.cx",
+
+  "ShiftUp": "SelectUp",
+  "ShiftDown": "SelectDown",
+  "ShiftLeft": "SelectLeft",
+  "ShiftRight": "SelectRight",
+  "Alt-Up": "MoveLinesUp",
+  "Alt-Down": "MoveLinesDown",
+  "CtrlShiftK": "SelectLine,SelectDown",
+  "CtrlShiftL": "lua:ide.sellines",
+  "CtrlShiftC": "CopyLine",
+  "CtrlShiftX": "CutLine",
+  "CtrlShiftD": "DuplicateLine",
+
+  "Alt-Ctrl-o": "lua:ide.dashboard"
 }
 EOF_BIND
 
 ############################ plugin: ide ############################
 cat > "$CFG/plug/ide/repo.json" <<'EOF_REPO'
-[{"Name":"ide","Description":"Personal IDE layer for micro","Website":"","Tags":["ide"],"Versions":[{"Version":"1.0.0","Url":"","Require":{"micro":">=2.0.0"}}]}]
+[{"Name":"ide","Description":"Personal IDE layer for micro (emacs nav + neovim-style dashboard + line selection)","Website":"","Tags":["ide"],"Versions":[{"Version":"1.3.0","Url":"","Require":{"micro":">=2.0.0"}}]}]
 EOF_REPO
 
 cat > "$CFG/plug/ide/ide.lua" <<'EOF_LUA'
-VERSION = "1.0.0"
+VERSION = "1.3.0"
 
 local micro = import("micro")
 local config = import("micro/config")
@@ -138,7 +239,6 @@ local function pushMRU(path, entry, max)
   writeLines(path, out)
 end
 
--- fzf picker: runs cmd, pipes to fzf, returns chosen line or nil
 local function pick(cmd, opts)
   local full = "(" .. cmd .. ") | fzf " .. (opts or "")
   local out, err = shell.RunInteractiveShell("sh -c " .. q(full), false, true)
@@ -146,10 +246,6 @@ local function pick(cmd, opts)
   out = trim(out)
   if out == "" then return nil end
   return out
-end
-
-local function pager(cmd)
-  shell.RunInteractiveShell("sh -c " .. q(cmd), false, false)
 end
 
 local function openAt(file, line)
@@ -167,23 +263,54 @@ local function wordAtCursor(bp)
   return line:sub(s, e - 1)
 end
 
----------------------------------------------------------------- dashboard
+---------------------------------------------------------------- selection
+-- Select N lines starting at the cursor. N defaults to 1 via prompt.
+-- Called by: C-x S, CtrlShiftL, dashboard 'l' key, :sellines N
+function sellines(bp, args)
+  if bp.Buf:GetName() == "dashboard" then
+    micro.InfoBar():Message("Open a file first, then select lines.")
+    return
+  end
+  local n
+  if args ~= nil and #args > 0 then n = tonumber(args[1]) end
+  if n == nil then
+    micro.InfoBar():Prompt("select N lines: ", "1", "Ide", nil, function(v, canceled)
+      if canceled then return end
+      local k = tonumber(v)
+      if k and k > 0 then sellines(bp, { tostring(k) }) end
+    end)
+    return
+  end
+  if n < 1 then return end
+  local sy = bp.Cursor.Y
+  local ey = math.min(sy + n - 1, bp.Buf:Lines() - 1)
+  bp.Cursor:SetSelectionStart(buffer.Loc(sy, 0))
+  bp.Cursor:SetSelectionEnd(buffer.Loc(ey, #bp.Buf:Line(ey)))
+  bp:Relocate()
+  micro.InfoBar():Message(string.format("selected %d line(s)", ey - sy + 1))
+end
+
+---------------------------------------------------------------- neovim-style dashboard
 local BANNER = [==[
- __  __ ___ ____ ____   ___
-|  \/  |_ _/ ___|  _ \ / _ \
-| |\/| || | |   | |_) | | | |
-| |  | || | |___|  _ <| |_| |
-|_|  |_|___\____|_| \_\\___/
+    ╭─────────────────────────────────────╮
+    │   m i c r o   ·   i d e             │
+    │   a small editor with a big ego     │
+    ╰─────────────────────────────────────╯
 ]==]
 
 local dashmap = {}
+local dashkeys = {}
 
 local function dashText()
   dashmap = {}
+  dashkeys = {}
   local L = {}
   local function add(s, e)
     L[#L + 1] = s
-    if e then dashmap[#L - 1] = e end
+    if e then
+      dashmap[#L - 1] = e
+      if e.key then dashkeys[e.key] = e end
+    end
   end
 
   for l in BANNER:gmatch("[^\n]+") do add("  " .. l) end
@@ -191,19 +318,38 @@ local function dashText()
   add("  cwd: " .. tidy(trim(sh("pwd"))))
   add("")
 
-  add("  Recent files")
+  add("  ▸ Quick actions")
+  local function act(key, label, cmd)
+    add(string.format("    %-2s  %s", key, label), { k = "cmd", c = cmd, key = key })
+  end
+  act("e", "New file",             "newfile")
+  act("f", "Find file (fzf)",      "findfile")
+  act("g", "Grep (rg --vimgrep)",  "rg")
+  act("r", "Replace in project",   "rgreplace")
+  act("s", "Symbols (ctags)",      "symbols")
+  act("i", "Symbols in this file", "symbolshere")
+  act("l", "Select lines",         "sellines")
+  act("d", "Refresh dashboard",    "dashboard")
+  act("q", "Quit",                 "quit")
+  add("")
+
+  add("  ▸ Recent")
   local r = readLines(RECENT)
   if #r == 0 then add("    (none yet)") end
-  for i, p in ipairs(r) do add(string.format("   %2d  %s", i, tidy(p)), { k = "file", p = p }) end
+  for i, p in ipairs(r) do
+    add(string.format("    %2d  %s", i, tidy(p)), { k = "file", p = p, key = tostring(i) })
+  end
   add("")
 
-  add("  Projects")
+  add("  ▸ Projects")
   local pr = readLines(PROJECTS)
   if #pr == 0 then add("    (none yet)") end
-  for i, p in ipairs(pr) do add(string.format("   %2d  %s", i, tidy(p)), { k = "proj", p = p }) end
+  for i, p in ipairs(pr) do
+    add(string.format("    %2d  %s", i, tidy(p)), { k = "proj", p = p })
+  end
   add("")
 
-  add("  Git status")
+  add("  ▸ Git")
   local g = sh("git status -sb 2>/dev/null")
   if g == "" then
     add("    not a git repository")
@@ -216,8 +362,26 @@ local function dashText()
     end
   end
   add("")
-  add("  Enter: open   C-x f: find file   C-x j: symbols   M-x: commands")
+  add("  ↑/↓ or C-p/C-n move · Enter run · e f g r s i d l q quick keys · C-x h toggle")
   return table.concat(L, "\n") .. "\n"
+end
+
+local function runAction(bp, e)
+  if e == nil then return end
+  if e.k == "file" then
+    bp:HandleCommand("open " .. q(e.p))
+  elseif e.k == "proj" then
+    bp:HandleCommand("cd " .. q(e.p))
+    showDashboard(bp)
+  elseif e.k == "cmd" then
+    if e.c == "quit" then
+      bp:Quit()
+    elseif e.c == "newfile" then
+      bp:HandleCommand("newfile")
+    else
+      bp:HandleCommand(e.c)
+    end
+  end
 end
 
 function showDashboard(bp, args)
@@ -228,17 +392,17 @@ end
 
 function preInsertNewline(bp)
   if bp.Buf:GetName() ~= "dashboard" then return true end
-  local e = dashmap[bp.Cursor.Y]
-  if e then
-    if e.k == "file" then
-      bp:HandleCommand("open " .. q(e.p))
-    elseif e.k == "proj" then
-      bp:HandleCommand("cd " .. q(e.p))
-      showDashboard(bp)
-    end
-  end
+  runAction(bp, dashmap[bp.Cursor.Y])
   return false
 end
+
+local function dashkey(bp, ch)
+  if bp.Buf:GetName() ~= "dashboard" then return end
+  local e = dashkeys[ch]
+  if e then runAction(bp, e) end
+end
+
+local KEYCHARS = { "e","f","g","r","s","i","d","l","q","1","2","3","4","5","6","7","8","9","0" }
 
 function postinit()
   local bp = micro.CurPane()
@@ -259,7 +423,7 @@ end
 
 ---------------------------------------------------------------- search / navigation
 local PREVIEW = [[--preview '(bat --color=always --line-range :80 {} 2>/dev/null || head -n 80 {})']]
-local CTAGS = "ctags -x -R --exclude=.git --exclude=node_modules --exclude='*.min.*' "
+local CTAGS = "ctags -x -R --exclude=.git --exclude=node_modules --exclude='*.min.*' --exclude=dist --exclude=build "
 
 function findFile(bp, args)
   local f = pick("rg --files --hidden -g '!.git' 2>/dev/null || find . -type f -not -path './.git/*'",
@@ -303,6 +467,8 @@ function search(bp, args)
   end
 end
 
+local function perlLiteral(s) return (s:gsub("([\\$@/])", "\\%1")) end
+
 local function doReplace(old, new)
   local files = trim(sh("rg -l --fixed-strings -- " .. q(old)))
   if files == "" then micro.InfoBar():Message("No matches"); return end
@@ -311,7 +477,7 @@ local function doReplace(old, new)
   micro.InfoBar():YNPrompt("Replace in " .. #list .. " file(s)? (y/n)", function(yes, canceled)
     if not yes or canceled then return end
     sh("perl -pi -e 'BEGIN{$a=shift;$b=shift} s/\\Q$a\\E/$b/g' " ..
-      q(old) .. " " .. q(new) .. " " .. table.concat(list, " "))
+      q(old) .. " " .. q(perlLiteral(new)) .. " " .. table.concat(list, " "))
     micro.InfoBar():Message("Replaced in " .. #list .. " file(s). Run 'reopen' on open buffers.")
   end)
 end
@@ -363,11 +529,11 @@ function fmt(bp, args) doFormat(bp) end
 function onSave(bp)
   if formatting then return end
   if config.GetGlobalOption("ide.fmtonsave") ~= true then return end
-  if bp.Buf:FileType() == "markdown" then return end -- markdown: manual only
+  if bp.Buf:FileType() == "markdown" then return end
   doFormat(bp)
 end
 
----------------------------------------------------------------- C-x prefix
+---------------------------------------------------------------- C-x prefix (Emacs)
 local CX = {
   ["s"] = function(bp) bp:Save() end,
   ["f"] = function(bp) findFile(bp) end,
@@ -384,6 +550,7 @@ local CX = {
   ["/"] = function(bp) search(bp) end,
   ["r"] = function(bp) replaceAll(bp) end,
   ["="] = function(bp) doFormat(bp) end,
+  ["S"] = function(bp) sellines(bp) end,
 }
 
 function cx(bp, args)
@@ -411,6 +578,12 @@ function cx(bp, args)
     end)
 end
 
+local function makeDashKey(ch)
+  local cmd = "dashkey-" .. ch
+  config.MakeCommand(cmd, function(bp, args) dashkey(bp, ch) end, config.NoComplete)
+  config.TryBindKey(ch, "command:" .. cmd, false)
+end
+
 ---------------------------------------------------------------- init
 function init()
   config.RegisterCommonOption("ide", "fmtonsave", true)
@@ -421,29 +594,55 @@ function init()
   config.MakeCommand("rg", search, config.NoComplete)
   config.MakeCommand("rgreplace", replaceAll, config.NoComplete)
   config.MakeCommand("fmt", fmt, config.NoComplete)
+  config.MakeCommand("sellines", sellines, config.NoComplete)
+
+  for _, ch in ipairs(KEYCHARS) do makeDashKey(ch) end
 end
 EOF_LUA
 
-############################ plugins ############################
+############################ micro plugins ############################
 if command -v micro >/dev/null 2>&1; then
   micro -plugin remove filemanager 2>/dev/null || true
-  micro -plugin install lsp || echo "Plugin install failed (offline?). Run: micro -plugin install lsp"
+  micro -plugin install lsp || echo "!! 'micro -plugin install lsp' failed (offline?). Retry later."
+
+  if [ "$DO_MANAGER" -eq 1 ]; then
+    if micro -plugin install manager 2>/dev/null; then
+      echo "==> manager installed. Alt-Ctrl-o now opens the nvim-style dashboard."
+    else
+      echo "!! Optional manager plugin failed (offline?). Skipping."
+    fi
+  fi
 else
-  echo "micro not found in PATH; install it first."
+  echo "!! micro not found in PATH after install; check your distro package."
 fi
 
 cat <<'EOF_DONE'
 
-Config written to ~/.config/micro (old config backed up as micro.bak.*).
+──────────────────────────────────────────────
+ micro IDE ready  (v1.3.0)
+──────────────────────────────────────────────
+Config:  ~/.config/micro   (backups: micro.bak.*)
 
-Install tools (Debian/Ubuntu example):
-  sudo apt install micro ripgrep fzf universal-ctags git clang-format shfmt yapf3 bat
-  npm i -g prettier
-  cargo install stylua        # Lua formatter
-Optional LSP servers: clangd, python-lsp-server, lua-language-server,
-  bash-language-server, vscode-langservers-extracted, marksman
+Emacs navigation:
+  C-f/C-b/C-n/C-p   char / line        M-f / M-b     word
+  C-a/C-e           line start/end     M-< / M->     buffer start/end
+  C-v / M-v         page down / up     C-k / C-w     kill / cut
+  M-w / C-y         copy / paste       C-x prefix    see C-x h help
 
-macOS: brew install micro ripgrep fzf universal-ctags git clang-format shfmt yapf stylua prettier bat
+Line selection:
+  Shift+↑/↓/←/→     extend selection   Alt+↑/↓       move lines up/down
+  C-S-k             select line+next   C-S-l         select N lines
+  C-S-c / C-S-x     copy / cut line    C-S-d         duplicate line
+  C-x S             select N lines (prompt)
 
-Start with:  micro        (dashboard)   or   micro file.c
+Neovim-style dashboard:
+  Alt-Ctrl-o        open dashboard      C-x h        open dashboard
+  Dashboard keys:   e f g r s i d l q   1-9 recent    Enter runs selection
+
+Search / navigate:
+  C-x f  find file (fzf)               C-x /  ripgrep
+  C-x j  symbols (project)             C-x i  symbols (file)
+  C-x r  replace in project            C-x =  format buffer
+
+Plugins:  ide (this), lsp, manager (optional, telescope-style)
 EOF_DONE
