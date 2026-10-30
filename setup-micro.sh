@@ -40,16 +40,25 @@ install_tools() {
   echo "==> Detected package manager: $os"
 
   case "$os" in
+    fedora)
+      # Lean install: skip weak deps, prefer clang-tools-extra over full clang.
+      sudo dnf install -y --setopt=install_weak_deps=False \
+        micro ripgrep fzf ctags git clang-tools-extra shfmt \
+        python3-yapf bat perl nodejs npm python3-pip curl
+      # Fedora ships 'yapf-3.x' as /usr/bin/yapf3 (or /usr/bin/yapf); make sure 'yapf' resolves.
+      if ! command -v yapf >/dev/null 2>&1 && command -v yapf3 >/dev/null 2>&1; then
+        sudo ln -sf "$(command -v yapf3)" /usr/local/bin/yapf
+      fi
+      # clangd comes from clang-tools-extra; verify.
+      command -v clangd >/dev/null 2>&1 || echo "!! clangd not found; install 'clang-tools-extra'"
+      # stylua is not packaged on Fedora — installed via cargo below if available.
+      ;;
     debian)
       sudo apt-get update
       sudo apt-get install -y \
         micro ripgrep fzf universal-ctags git clang-format shfmt yapf3 \
         bat perl python3-pip npm curl
       command -v yapf >/dev/null 2>&1 || sudo ln -sf "$(command -v yapf3)" /usr/local/bin/yapf
-      ;;
-    fedora)
-      sudo dnf install -y \
-        micro ripgrep fzf ctags git clang shfmt yapf bat perl nodejs npm
       ;;
     arch)
       sudo pacman -S --needed --noconfirm \
@@ -78,6 +87,7 @@ install_tools() {
     cargo install stylua --locked 2>/dev/null || echo "!! stylua install failed"
   else
     echo "!! cargo not found; install Rust (https://rustup.rs) for stylua, or skip"
+    [ "$os" = "fedora" ] && echo "   on Fedora: sudo dnf install rust cargo"
   fi
 
   if command -v pip3 >/dev/null 2>&1; then
@@ -85,7 +95,7 @@ install_tools() {
     pip3 install --user python-lsp-server 2>/dev/null || true
   fi
   echo "==> Note: clangd, lua-language-server, marksman are not installed automatically."
-  echo "    clangd:        sudo apt install clangd    (or: brew install llvm)"
+  echo "    clangd:        sudo dnf install clang-tools-extra"
   echo "    lua-ls:        https://github.com/LuaLS/lua-language-server/releases"
   echo "    marksman:      https://github.com/artempyanykh/marksman/releases"
 }
@@ -129,6 +139,11 @@ cat > "$CFG/settings.json" <<'EOF_SETTINGS'
   "ft:makefile": { "tabstospaces": false },
 
   "ide.fmtonsave": true,
+
+  "pluginrepos": [
+    "https://codeberg.org/micro-plugins/manager/raw/branch/main/repo.json"
+  ],
+
   "lsp.server": "python=pylsp,c=clangd,c++=clangd,lua=lua-language-server,shell=bash-language-server start,json=vscode-json-language-server --stdio,html=vscode-html-language-server --stdio,css=vscode-css-language-server --stdio,markdown=marksman server"
 }
 EOF_SETTINGS
@@ -606,10 +621,12 @@ if command -v micro >/dev/null 2>&1; then
   micro -plugin install lsp || echo "!! 'micro -plugin install lsp' failed (offline?). Retry later."
 
   if [ "$DO_MANAGER" -eq 1 ]; then
+    # pluginrepos must already be in settings.json (written above), so this resolves.
     if micro -plugin install manager 2>/dev/null; then
       echo "==> manager installed. Alt-Ctrl-o now opens the nvim-style dashboard."
     else
-      echo "!! Optional manager plugin failed (offline?). Skipping."
+      echo "!! Optional manager plugin failed (offline or repo unreachable?). Skipping."
+      echo "   Retry with: micro -plugin install manager"
     fi
   fi
 else
@@ -619,9 +636,19 @@ fi
 cat <<'EOF_DONE'
 
 ──────────────────────────────────────────────
- micro IDE ready  (v1.3.0)
+ micro IDE ready  (v1.3.0 · Fedora-aware)
 ──────────────────────────────────────────────
 Config:  ~/.config/micro   (backups: micro.bak.*)
+
+Fedora quick install:
+  sudo dnf install -y --setopt=install_weak_deps=False \
+      micro ripgrep fzf ctags git clang-tools-extra shfmt \
+      python3-yapf bat perl nodejs npm python3-pip
+  npm i -g prettier vscode-langservers-extracted bash-language-server python-lsp-server
+  sudo dnf install rust cargo        # for stylua
+  cargo install stylua --locked
+  # clangd: already in clang-tools-extra
+  # lua-ls / marksman: download release tarballs
 
 Emacs navigation:
   C-f/C-b/C-n/C-p   char / line        M-f / M-b     word
@@ -645,4 +672,5 @@ Search / navigate:
   C-x r  replace in project            C-x =  format buffer
 
 Plugins:  ide (this), lsp, manager (optional, telescope-style)
+Manager repo: https://codeberg.org/micro-plugins/manager
 EOF_DONE
